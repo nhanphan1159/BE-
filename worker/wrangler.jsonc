@@ -1,0 +1,9 @@
+{
+  "name": "todo-list-api",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-18",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true
+  }
+}

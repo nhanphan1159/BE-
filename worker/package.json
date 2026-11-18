@@ -1,0 +1,22 @@
+{
+  "name": "todo-list-worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "prisma:generate": "prisma generate",
+    "prisma:push": "prisma db push"
+  },
+  "dependencies": {
+    "@neondatabase/serverless": "^1.0.2",
+    "hono": "^4.11.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/pg": "^8.15.0",
+    "prisma": "^7.0.0",
+    "typescript": "^5.9.0",
+    "wrangler": "^4.50.0"
+  }
+}
