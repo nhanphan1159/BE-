@@ -1,0 +1,123 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum TodoStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+enum Priority {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum TransactionType {
+  INCOME
+  EXPENSE
+}
+
+enum JarType {
+  NEC   // 55% Nhu cầu thiết yếu (Necessities)
+  FFA   // 10% Tự do tài chính (Financial Freedom - Quy tắc Babylon: Trả cho mình 10% trước)
+  LTSS  // 10% Tiết kiệm dài hạn (Long-term savings for spending)
+  EDU   // 10% Giáo dục / Phát triển bản thân (Education)
+  PLAY  // 10% Hưởng thụ / Giải trí (Play)
+  GIVE  // 5%  Cho đi / Từ thiện (Give)
+}
+
+model User {
+  id           String        @id @default(uuid())
+  email        String        @unique
+  name         String?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  todos        Todo[]
+  jars         Jar[]
+  transactions Transaction[]
+
+  @@map("users")
+}
+
+model Todo {
+  id          String      @id @default(uuid())
+  title       String
+  description String?
+  targetDate  DateTime    @db.Date
+  status      TodoStatus  @default(PENDING)
+  priority    Priority    @default(MEDIUM)
+  userId      String?
+  user        User?       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  subtasks    SubTask[]
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  @@index([targetDate])
+  @@map("todos")
+}
+
+model SubTask {
+  id          String   @id @default(uuid())
+  title       String
+  isCompleted Boolean  @default(false)
+  todoId      String
+  todo        Todo     @relation(fields: [todoId], references: [id], onDelete: Cascade)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@map("subtasks")
+}
+
+model Jar {
+  id               String        @id @default(uuid())
+  type             JarType       @unique
+  name             String
+  targetPercentage Float         // 55, 10, 10, 10, 10, 5
+  balance          Float         @default(0)
+  color            String
+  description      String
+  userId           String?
+  user             User?         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transactions     Transaction[]
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+
+  @@map("jars")
+}
+
+model TransactionEdit {
+  id            String      @id @default(uuid())
+  transactionId String
+  transaction   Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  snapshot      Json
+  editedAt      DateTime    @default(now())
+
+  @@index([transactionId, editedAt])
+  @@map("transaction_edits")
+}
+
+model Transaction {
+  id              String          @id @default(uuid())
+  jarId           String
+  jar             Jar             @relation(fields: [jarId], references: [id], onDelete: Cascade)
+  amount          Float
+  type            TransactionType
+  category        String?
+  note            String?
+  transactionDate DateTime        @default(now())
+  userId          String?
+  user            User?           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt       DateTime        @default(now())
+  editHistory     TransactionEdit[]
+
+  @@index([transactionDate])
+  @@map("transactions")
+}
