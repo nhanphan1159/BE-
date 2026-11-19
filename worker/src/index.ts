@@ -196,13 +196,14 @@ app.post("/finance/income/allocate", async (c) => {
   if (typeof body.totalAmount !== "number" || body.totalAmount <= 0) return c.json({ message: "totalAmount must be a positive number" }, 400);
   const jars = await sql`SELECT * FROM jars`;
   const transactions = [];
+  const transactionDate = body.transactionDate ? new Date(body.transactionDate) : new Date();
   for (const jar of jars) {
     const amount = body.customAllocations?.[jar.type] ?? Math.round((body.totalAmount * Number(jar.targetPercentage)) / 100);
     if (amount > 0) {
       await sql`UPDATE jars SET balance=balance+${amount}, "updatedAt"=NOW() WHERE id=${jar.id}`;
       const tx = await sql`
         INSERT INTO transactions (id, "jarId", amount, type, category, note, "transactionDate", "createdAt")
-        VALUES (gen_random_uuid(), ${jar.id}, ${amount}, 'INCOME'::"TransactionType", 'Income Allocation', ${body.note || `Income allocated to ${jar.name}`}, NOW(), NOW())
+        VALUES (gen_random_uuid(), ${jar.id}, ${amount}, 'INCOME'::"TransactionType", 'Income Allocation', ${body.note || `Income allocated to ${jar.name}`}, ${transactionDate}, NOW())
         RETURNING *
       `;
       transactions.push(tx[0]);
@@ -256,11 +257,97 @@ app.get("/finance/transactions/:id/history", async (c) => {
 app.get("/finance/transactions", async (c) => {
   const sql = sqlFor(c.env.DATABASE_URL);
   const jarType = c.req.query("jarType");
+  const month = c.req.query("month");
+  const year = c.req.query("year");
   const limit = Math.min(Number.parseInt(c.req.query("limit") || "50", 10) || 50, 500);
-  const rows = jarType
+  let rows: any[];
+  if (month) {
+    const match = month.match(/^(\d{4})-(\d{2})$/);
+    if (!match) return c.json({ message: "month must use YYYY-MM" }, 400);
+    const yearValue = Number(match[1]);
+    const monthValue = Number(match[2]) - 1;
+    const start = new Date(Date.UTC(yearValue, monthValue, 1));
+    const end = new Date(Date.UTC(yearValue, monthValue + 1, 1));
+    rows = jarType
+      ? await sql`SELECT t.*, row_to_json(j) AS jar FROM transactions t JOIN jars j ON j.id=t."jarId" WHERE j.type=${jarType}::"JarType" AND t."transactionDate" >= ${start} AND t."transactionDate" < ${end} ORDER BY t."transactionDate" DESC LIMIT ${limit}`
+      : await sql`SELECT t.*, row_to_json(j) AS jar FROM transactions t JOIN jars j ON j.id=t."jarId" WHERE t."transactionDate" >= ${start} AND t."transactionDate" < ${end} ORDER BY t."transactionDate" DESC LIMIT ${limit}`;
+  } else if (year) {
+    const yearValue = Number(year);
+    if (!Number.isInteger(yearValue)) return c.json({ message: "year must be a four-digit year" }, 400);
+    const start = new Date(Date.UTC(yearValue, 0, 1));
+    const end = new Date(Date.UTC(yearValue + 1, 0, 1));
+    rows = jarType
+      ? await sql`SELECT t.*, row_to_json(j) AS jar FROM transactions t JOIN jars j ON j.id=t."jarId" WHERE j.type=${jarType}::"JarType" AND t."transactionDate" >= ${start} AND t."transactionDate" < ${end} ORDER BY t."transactionDate" DESC LIMIT ${limit}`
+      : await sql`SELECT t.*, row_to_json(j) AS jar FROM transactions t JOIN jars j ON j.id=t."jarId" WHERE t."transactionDate" >= ${start} AND t."transactionDate" < ${end} ORDER BY t."transactionDate" DESC LIMIT ${limit}`;
+  } else {
+    rows = jarType
     ? await sql`SELECT t.*, row_to_json(j) AS jar FROM transactions t JOIN jars j ON j.id=t."jarId" WHERE j.type=${jarType}::"JarType" ORDER BY t."transactionDate" DESC LIMIT ${limit}`
     : await sql`SELECT t.*, row_to_json(j) AS jar FROM transactions t JOIN jars j ON j.id=t."jarId" ORDER BY t."transactionDate" DESC LIMIT ${limit}`;
+  }
   return c.json(rows);
+});
+
+app.get("/finance/period-comparison", async (c) => {
+  const sql = sqlFor(c.env.DATABASE_URL);
+  const groupBy = c.req.query("groupBy") || "month";
+  const period = c.req.query("period");
+  const transactions = await sql`
+    SELECT amount, type, "transactionDate"
+    FROM transactions
+    ORDER BY "transactionDate" ASC
+  `;
+
+  const sumPeriod = (start: Date, end: Date) => {
+    const filtered = transactions.filter((tx: any) =>
+      new Date(tx.transactionDate) >= start && new Date(tx.transactionDate) < end,
+    );
+    const income = filtered.filter((tx: any) => tx.type === "INCOME").reduce((sum: number, tx: any) => sum + Number(tx.amount), 0);
+    const expense = filtered.filter((tx: any) => tx.type === "EXPENSE").reduce((sum: number, tx: any) => sum + Number(tx.amount), 0);
+    return { income, expense, net: income - expense };
+  };
+
+  if (groupBy === "year") {
+    const selectedYear = period && /^\d{4}$/.test(period)
+      ? Number(period)
+      : new Date().getUTCFullYear();
+    return c.json([-1, 0, 1].map((offset) => {
+      const value = selectedYear + offset;
+      return {
+        label: String(value),
+        period: String(value),
+        ...sumPeriod(new Date(Date.UTC(value, 0, 1)), new Date(Date.UTC(value + 1, 0, 1))),
+      };
+    }));
+  }
+
+  const match = period?.match(/^(\d{4})-(\d{2})$/);
+  const selectedYear = match ? Number(match[1]) : new Date().getUTCFullYear();
+  const selectedMonth = match ? Number(match[2]) - 1 : new Date().getUTCMonth();
+  const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  return c.json([-1, 0, 1].map((offset) => {
+    const date = new Date(Date.UTC(selectedYear, selectedMonth + offset, 1));
+    const valueYear = date.getUTCFullYear();
+    const valueMonth = date.getUTCMonth();
+    return {
+      label: `${monthNames[valueMonth]} ${valueYear}`,
+      period: `${valueYear}-${String(valueMonth + 1).padStart(2, "0")}`,
+      ...sumPeriod(
+        new Date(Date.UTC(valueYear, valueMonth, 1)),
+        new Date(Date.UTC(valueYear, valueMonth + 1, 1)),
+      ),
+    };
+  }));
+});
+
+app.delete("/finance/reset", async (c) => {
+  if (c.req.header("X-Confirm-Reset") !== "DELETE PRODUCTION DATA") {
+    return c.json({ message: "Reset confirmation required" }, 403);
+  }
+  const sql = sqlFor(c.env.DATABASE_URL);
+  await sql`DELETE FROM transaction_edits`;
+  await sql`DELETE FROM transactions`;
+  await sql`UPDATE jars SET balance=0, "updatedAt"=NOW()`;
+  return c.json({ success: true, message: "Finance data reset successfully" });
 });
 
 export default app;
