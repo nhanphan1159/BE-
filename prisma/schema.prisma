@@ -121,3 +121,23 @@ model Transaction {
   @@index([transactionDate])
   @@map("transactions")
 }
+
+model Investment {
+  id                String   @id @default(uuid())
+  symbol            String
+  name              String
+  quantity          Float
+  averageCost       Float
+  currentPrice      Float
+  targetPrice       Float?
+  market            String   @default("US")
+  sector            String?
+  note              String?
+  userId            String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@unique([symbol, userId])
+  @@index([symbol])
+  @@map("investments")
+}

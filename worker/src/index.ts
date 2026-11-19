@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { neon } from "@neondatabase/serverless";
 
-type Env = { DATABASE_URL: string };
+type Env = { DATABASE_URL: string; GEMINI_API_KEY?: string; GEMINI_MODEL?: string };
 
 const app = new Hono<{ Bindings: Env }>();
 app.use("*", cors({
@@ -40,7 +40,30 @@ async function initJars(url: string) {
         ON CONFLICT (type) DO NOTHING
       `;
     }
+
   }
+}
+
+async function initInvestments(url: string) {
+  const sql = sqlFor(url);
+  await sql`
+    CREATE TABLE IF NOT EXISTS investments (
+      id TEXT PRIMARY KEY,
+      symbol TEXT NOT NULL,
+      name TEXT NOT NULL,
+      quantity DOUBLE PRECISION NOT NULL,
+      "averageCost" DOUBLE PRECISION NOT NULL,
+      "currentPrice" DOUBLE PRECISION NOT NULL,
+      "targetPrice" DOUBLE PRECISION,
+      market TEXT NOT NULL DEFAULT 'US',
+      sector TEXT,
+      note TEXT,
+      "userId" TEXT,
+      "createdAt" TIMESTAMP NOT NULL DEFAULT NOW(),
+      "updatedAt" TIMESTAMP NOT NULL DEFAULT NOW(),
+      UNIQUE(symbol, "userId")
+    )
+  `;
 }
 
 async function todoWithSubtasks(url: string, todoId: string) {
@@ -348,6 +371,149 @@ app.delete("/finance/reset", async (c) => {
   await sql`DELETE FROM transactions`;
   await sql`UPDATE jars SET balance=0, "updatedAt"=NOW()`;
   return c.json({ success: true, message: "Finance data reset successfully" });
+});
+
+app.get("/finance/investments", async (c) => {
+  await initInvestments(c.env.DATABASE_URL);
+  const sql = sqlFor(c.env.DATABASE_URL);
+  const rows = await sql`SELECT * FROM investments ORDER BY "updatedAt" DESC`;
+  return c.json(rows.map((investment: any) => {
+    const quantity = Number(investment.quantity);
+    const averageCost = Number(investment.averageCost);
+    const currentPrice = Number(investment.currentPrice);
+    const costBasis = quantity * averageCost;
+    const marketValue = quantity * currentPrice;
+    const profit = marketValue - costBasis;
+    const profitPercentage = costBasis ? (profit / costBasis) * 100 : 0;
+    const targetPrice = investment.targetPrice === null ? null : Number(investment.targetPrice);
+    const targetDifference = targetPrice === null ? null : targetPrice - currentPrice;
+    const upsidePercentage = targetDifference === null ? null : (targetDifference / currentPrice) * 100;
+    let analysis = "Under cost basis";
+    if (upsidePercentage !== null && upsidePercentage >= 15) analysis = "Potential upside";
+    else if (profitPercentage < -15) analysis = "High loss — review thesis";
+    else if (profitPercentage >= 20) analysis = "Strong gain — consider profit-taking";
+    else if (profitPercentage >= 0) analysis = "Profitable";
+    return { ...investment, costBasis, marketValue, profit, profitPercentage, targetDifference, upsidePercentage, analysis };
+  }));
+});
+
+app.post("/finance/investments", async (c) => {
+  await initInvestments(c.env.DATABASE_URL);
+  const sql = sqlFor(c.env.DATABASE_URL);
+  const body = await c.req.json<any>();
+  if (!body.symbol || !body.name || !body.quantity || !body.averageCost || !body.currentPrice) {
+    return c.json({ message: "symbol, name, quantity, averageCost, and currentPrice are required" }, 400);
+  }
+  const symbol = String(body.symbol).trim().toUpperCase();
+  const rows = await sql`
+    INSERT INTO investments (
+      id, symbol, name, quantity, "averageCost", "currentPrice", "targetPrice",
+      market, sector, note, "createdAt", "updatedAt"
+    )
+    VALUES (
+      gen_random_uuid(), ${symbol}, ${body.name}, ${body.quantity}, ${body.averageCost},
+      ${body.currentPrice}, ${body.targetPrice ?? null}, ${body.market || "US"},
+      ${body.sector ?? null}, ${body.note ?? null}, NOW(), NOW()
+    )
+    RETURNING *
+  `;
+  return c.json(rows[0], 201);
+});
+
+app.patch("/finance/investments/:id", async (c) => {
+  await initInvestments(c.env.DATABASE_URL);
+  const sql = sqlFor(c.env.DATABASE_URL);
+  const body = await c.req.json<any>();
+  const rows = await sql`
+    UPDATE investments SET
+      symbol=${String(body.symbol).trim().toUpperCase()},
+      name=${body.name},
+      quantity=${body.quantity},
+      "averageCost"=${body.averageCost},
+      "currentPrice"=${body.currentPrice},
+      "targetPrice"=${body.targetPrice ?? null},
+      market=${body.market || "US"},
+      sector=${body.sector ?? null},
+      note=${body.note ?? null},
+      "updatedAt"=NOW()
+    WHERE id=${c.req.param("id")}
+    RETURNING *
+  `;
+  return rows[0] ? c.json(rows[0]) : c.json({ message: "Investment not found" }, 404);
+});
+
+app.delete("/finance/investments/:id", async (c) => {
+  await initInvestments(c.env.DATABASE_URL);
+  const sql = sqlFor(c.env.DATABASE_URL);
+  await sql`DELETE FROM investments WHERE id=${c.req.param("id")}`;
+  return c.json({ success: true });
+});
+
+app.post("/finance/ai/analyze", async (c) => {
+  if (!c.env.GEMINI_API_KEY) {
+    return c.json({ message: "AI analysis is not configured. Set GEMINI_API_KEY on the Worker." }, 400);
+  }
+
+  await initInvestments(c.env.DATABASE_URL);
+  const sql = sqlFor(c.env.DATABASE_URL);
+  const body = await c.req.json<any>();
+  const holdings = await sql`SELECT * FROM investments ORDER BY "updatedAt" DESC`;
+  const candidates = Array.from(new Set(
+    ((body.symbols?.length ? body.symbols : holdings.map((item: any) => item.symbol)) as string[])
+      .map((symbol) => String(symbol).trim().toUpperCase())
+      .filter(Boolean),
+  ));
+  if (!candidates.length) {
+    return c.json({ message: "Add an investment or provide stock symbols to analyze." }, 400);
+  }
+
+  const candidateData = candidates.map((symbol) => {
+    const held = holdings.find((item: any) => String(item.symbol).toUpperCase() === symbol);
+    return held || { symbol, name: symbol, quantity: 0, averageCost: 0, currentPrice: null, targetPrice: null };
+  });
+
+  const model = c.env.GEMINI_MODEL || "gemini-3.8-flash";
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(c.env.GEMINI_API_KEY)}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        systemInstruction: {
+          parts: [{
+            text: "You are a cautious financial-analysis assistant. Analyze only the supplied portfolio fields and general market knowledge. Never claim guaranteed prices or returns. Explain uncertainty, risks, catalysts, valuation, and a price trend estimate.",
+          }],
+        },
+        contents: [{
+          role: "user",
+          parts: [{
+            text: JSON.stringify({
+            instruction: "Return valid JSON with keys summary, recommendations, and marketContext. recommendations must be an array. Each item: symbol, action (BUY|HOLD|WATCH|AVOID), confidence (0-100), trend (UP|SIDEWAYS|DOWN), horizon (SHORT_TERM|MEDIUM_TERM|LONG_TERM), estimatedChangePercentLow, estimatedChangePercentHigh, reasoning, risks (array), and isHeld.",
+            disclaimer: "Stock recommendations are educational estimates, not guaranteed outcomes or personalized financial advice.",
+            candidates: candidateData,
+          }),
+          }],
+        }],
+        generationConfig: {
+          temperature: 0.2,
+          responseMimeType: "application/json",
+        },
+      }),
+    },
+  );
+
+  if (!response.ok) {
+    const detail = (await response.text()).slice(0, 300);
+    return c.json({ message: `Gemini analysis failed: ${response.status} ${detail}` }, 502);
+  }
+  const result = await response.json() as any;
+  const content = result.candidates?.[0]?.content?.parts?.map((part: any) => part.text || "").join("");
+  if (!content) return c.json({ message: "Gemini returned no analysis." }, 502);
+  try {
+    return c.json(JSON.parse(content));
+  } catch {
+    return c.json({ message: "Gemini returned an invalid analysis response." }, 502);
+  }
 });
 
 export default app;

@@ -3,6 +3,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { JarType, TransactionType } from '@prisma/client';
 import { AllocateIncomeDto } from './dto/allocate-income.dto';
 import { CreateExpenseDto } from './dto/create-expense.dto';
+import { CreateInvestmentDto } from './dto/create-investment.dto';
 
 const DEFAULT_JARS = [
   {
@@ -282,6 +283,160 @@ export class FinanceService implements OnModuleInit {
         ),
       };
     });
+  }
+
+  async getInvestments() {
+    const investments = await this.prisma.investment.findMany({
+      orderBy: { updatedAt: 'desc' },
+    });
+
+    return investments.map((investment) => {
+      const costBasis = investment.quantity * investment.averageCost;
+      const marketValue = investment.quantity * investment.currentPrice;
+      const profit = marketValue - costBasis;
+      const profitPercentage = costBasis ? (profit / costBasis) * 100 : 0;
+      const targetDifference = investment.targetPrice
+        ? investment.targetPrice - investment.currentPrice
+        : null;
+      const upsidePercentage = targetDifference !== null && investment.currentPrice
+        ? (targetDifference / investment.currentPrice) * 100
+        : null;
+
+      return {
+        ...investment,
+        costBasis,
+        marketValue,
+        profit,
+        profitPercentage,
+        targetDifference,
+        upsidePercentage,
+        analysis: this.getInvestmentAnalysis({
+          profitPercentage,
+          upsidePercentage,
+        }),
+      };
+    });
+  }
+
+  private getInvestmentAnalysis(values: {
+    profitPercentage: number;
+    upsidePercentage: number | null;
+  }) {
+    if (values.upsidePercentage !== null && values.upsidePercentage >= 15) {
+      return 'Potential upside';
+    }
+    if (values.profitPercentage < -15) {
+      return 'High loss — review thesis';
+    }
+    if (values.profitPercentage >= 20) {
+      return 'Strong gain — consider profit-taking';
+    }
+    if (values.profitPercentage >= 0) {
+      return 'Profitable';
+    }
+    return 'Under cost basis';
+  }
+
+  async createInvestment(dto: CreateInvestmentDto) {
+    return this.prisma.investment.create({
+      data: {
+        ...dto,
+        symbol: dto.symbol.trim().toUpperCase(),
+        market: dto.market || 'US',
+      },
+    });
+  }
+
+  async updateInvestment(id: string, dto: CreateInvestmentDto) {
+    return this.prisma.investment.update({
+      where: { id },
+      data: {
+        ...dto,
+        symbol: dto.symbol.trim().toUpperCase(),
+        market: dto.market || 'US',
+      },
+    });
+  }
+
+  async deleteInvestment(id: string) {
+    await this.prisma.investment.delete({ where: { id } });
+    return { success: true };
+  }
+
+  async analyzeInvestmentsWithAi(symbols?: string[]) {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      throw new BadRequestException(
+        'AI analysis is not configured. Set GEMINI_API_KEY in server/.env.',
+      );
+    }
+
+    const investments = await this.getInvestments();
+    const candidates = Array.from(new Set(
+      (symbols?.length ? symbols : investments.map((item) => item.symbol))
+        .map((symbol) => symbol.trim().toUpperCase())
+        .filter(Boolean),
+    ));
+
+    if (!candidates.length) {
+      throw new BadRequestException('Add an investment or provide stock symbols to analyze.');
+    }
+
+    const candidateData = candidates.map((symbol) => {
+      const held = investments.find((item) => item.symbol === symbol);
+      return held || { symbol, name: symbol, quantity: 0, averageCost: 0, currentPrice: null, targetPrice: null };
+    });
+
+    const model = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          systemInstruction: {
+            parts: [{
+              text: 'You are a cautious financial-analysis assistant. Analyze market data only from the supplied portfolio fields and your general knowledge. Never claim guaranteed prices or returns. Explain uncertainty, risks, catalysts, valuation, and a price trend estimate.',
+            }],
+          },
+          contents: [{
+            role: 'user',
+            parts: [{
+              text: JSON.stringify({
+                instruction:
+                  'Return valid JSON with keys summary, recommendations, and marketContext. recommendations must be an array. Each item: symbol, action (BUY|HOLD|WATCH|AVOID), confidence (0-100), trend (UP|SIDEWAYS|DOWN), horizon (SHORT_TERM|MEDIUM_TERM|LONG_TERM), estimatedChangePercentLow, estimatedChangePercentHigh, reasoning, risks (array), and isHeld. Mark likely purchases as BUY, existing holdings as HOLD unless evidence suggests a different action.',
+                disclaimer:
+                  'Stock recommendations are educational estimates, not guaranteed outcomes or personalized financial advice.',
+                candidates: candidateData,
+              }),
+            }],
+          }],
+          generationConfig: {
+            temperature: 0.2,
+            responseMimeType: 'application/json',
+          },
+        }),
+      },
+    );
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new BadRequestException(`Gemini analysis failed: ${response.status} ${errorText.slice(0, 300)}`);
+    }
+
+    const result = await response.json() as any;
+    const content = result.candidates?.[0]?.content?.parts
+      ?.map((part: any) => part.text || '')
+      .join('');
+    if (!content) {
+      throw new BadRequestException('Gemini returned no analysis.');
+    }
+
+    try {
+      return JSON.parse(content);
+    } catch {
+      throw new BadRequestException('Gemini returned an invalid analysis response.');
+    }
   }
 
   async getFinancialSummary() {

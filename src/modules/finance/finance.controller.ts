@@ -1,8 +1,9 @@
-import { Controller, Get, Post, Body, Query, Patch, Param } from '@nestjs/common';
+import { Controller, Get, Post, Body, Query, Patch, Param, Delete } from '@nestjs/common';
 import { FinanceService } from './finance.service';
 import { AllocateIncomeDto } from './dto/allocate-income.dto';
 import { CreateExpenseDto } from './dto/create-expense.dto';
 import { JarType } from '@prisma/client';
+import { CreateInvestmentDto } from './dto/create-investment.dto';
 
 @Controller('finance')
 export class FinanceController {
@@ -56,5 +57,30 @@ export class FinanceController {
     @Query('period') period?: string,
   ) {
     return this.financeService.getPeriodComparison(groupBy, year, period);
+  }
+
+  @Get('investments')
+  getInvestments() {
+    return this.financeService.getInvestments();
+  }
+
+  @Post('investments')
+  createInvestment(@Body() dto: CreateInvestmentDto) {
+    return this.financeService.createInvestment(dto);
+  }
+
+  @Patch('investments/:id')
+  updateInvestment(@Param('id') id: string, @Body() dto: CreateInvestmentDto) {
+    return this.financeService.updateInvestment(id, dto);
+  }
+
+  @Delete('investments/:id')
+  deleteInvestment(@Param('id') id: string) {
+    return this.financeService.deleteInvestment(id);
+  }
+
+  @Post('ai/analyze')
+  analyzePortfolio(@Body() body: { symbols?: string[] }) {
+    return this.financeService.analyzeInvestmentsWithAi(body?.symbols);
   }
 }
