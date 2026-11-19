@@ -88,8 +88,9 @@ export class FinanceService implements OnModuleInit {
   }
 
   async allocateIncome(dto: AllocateIncomeDto) {
-    const { totalAmount, note, customAllocations } = dto;
+    const { totalAmount, note, customAllocations, transactionDate } = dto;
     const jars = await this.getJars();
+    const allocatedDate = transactionDate ? new Date(transactionDate) : new Date();
 
     const transactions = [];
 
@@ -114,7 +115,7 @@ export class FinanceService implements OnModuleInit {
             type: TransactionType.INCOME,
             category: 'Income Allocation',
             note: note || `Income allocated to ${jar.name}`,
-            transactionDate: new Date(),
+            transactionDate: allocatedDate,
           },
         });
         transactions.push(tx);
@@ -183,10 +184,29 @@ export class FinanceService implements OnModuleInit {
     return this.prisma.transactionEdit.findMany({ where: { transactionId: id }, orderBy: { editedAt: 'desc' } });
   }
 
-  async getTransactions(params?: { jarType?: JarType; limit?: number }) {
+  async getTransactions(params?: { jarType?: JarType; limit?: number; month?: string; year?: string }) {
     const where: any = {};
     if (params?.jarType) {
       where.jar = { type: params.jarType };
+    }
+    if (params?.month) {
+      const match = params.month.match(/^(\d{4})-(\d{2})$/);
+      if (match) {
+        const year = Number(match[1]);
+        const month = Number(match[2]) - 1;
+        where.transactionDate = {
+          gte: new Date(Date.UTC(year, month, 1)),
+          lt: new Date(Date.UTC(year, month + 1, 1)),
+        };
+      }
+    } else if (params?.year) {
+      const year = Number(params.year);
+      if (Number.isInteger(year)) {
+        where.transactionDate = {
+          gte: new Date(Date.UTC(year, 0, 1)),
+          lt: new Date(Date.UTC(year + 1, 0, 1)),
+        };
+      }
     }
 
     return this.prisma.transaction.findMany({
@@ -198,6 +218,69 @@ export class FinanceService implements OnModuleInit {
           select: { name: true, type: true, color: true },
         },
       },
+    });
+  }
+
+  async getPeriodComparison(groupBy: 'month' | 'year', year?: string, period?: string) {
+    const transactions = await this.prisma.transaction.findMany({
+      select: { amount: true, type: true, transactionDate: true },
+      orderBy: { transactionDate: 'asc' },
+    });
+
+    const sumPeriod = (start: Date, end: Date) => {
+      const periodTransactions = transactions.filter((tx) =>
+        tx.transactionDate >= start && tx.transactionDate < end,
+      );
+      const income = periodTransactions
+        .filter((tx) => tx.type === TransactionType.INCOME)
+        .reduce((sum, tx) => sum + tx.amount, 0);
+      const expense = periodTransactions
+        .filter((tx) => tx.type === TransactionType.EXPENSE)
+        .reduce((sum, tx) => sum + tx.amount, 0);
+      return { income, expense, net: income - expense };
+    };
+
+    if (groupBy === 'year') {
+      const selectedYear = period && /^\d{4}$/.test(period)
+        ? Number(period)
+        : year && /^\d{4}$/.test(year)
+          ? Number(year)
+          : new Date().getUTCFullYear();
+
+      return [-1, 0, 1].map((offset) => {
+        const value = selectedYear + offset;
+        const start = new Date(Date.UTC(value, 0, 1));
+        const end = new Date(Date.UTC(value + 1, 0, 1));
+        return {
+          label: String(value),
+          period: String(value),
+          ...sumPeriod(start, end),
+        };
+      });
+    }
+
+    const monthMatch = period?.match(/^(\d{4})-(\d{2})$/);
+    const selectedYear = monthMatch
+      ? Number(monthMatch[1])
+      : year && /^\d{4}$/.test(year)
+        ? Number(year)
+        : new Date().getUTCFullYear();
+    const selectedMonth = monthMatch ? Number(monthMatch[2]) - 1 : new Date().getUTCMonth();
+    const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+    return [-1, 0, 1].map((offset) => {
+      const date = new Date(Date.UTC(selectedYear, selectedMonth + offset, 1));
+      const valueYear = date.getUTCFullYear();
+      const valueMonth = date.getUTCMonth();
+      const periodValue = `${valueYear}-${String(valueMonth + 1).padStart(2, '0')}`;
+      return {
+        label: `${monthNames[valueMonth]} ${valueYear}`,
+        period: periodValue,
+        ...sumPeriod(
+          new Date(Date.UTC(valueYear, valueMonth, 1)),
+          new Date(Date.UTC(valueYear, valueMonth + 1, 1)),
+        ),
+      };
     });
   }
 

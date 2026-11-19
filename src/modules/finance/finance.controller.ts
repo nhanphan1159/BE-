@@ -42,8 +42,19 @@ export class FinanceController {
   getTransactions(
     @Query('jarType') jarType?: JarType,
     @Query('limit') limit?: string,
+    @Query('month') month?: string,
+    @Query('year') year?: string,
   ) {
     const parsedLimit = limit ? parseInt(limit, 10) : 50;
-    return this.financeService.getTransactions({ jarType, limit: parsedLimit });
+    return this.financeService.getTransactions({ jarType, limit: parsedLimit, month, year });
+  }
+
+  @Get('period-comparison')
+  getPeriodComparison(
+    @Query('groupBy') groupBy: 'month' | 'year' = 'month',
+    @Query('year') year?: string,
+    @Query('period') period?: string,
+  ) {
+    return this.financeService.getPeriodComparison(groupBy, year, period);
   }
 }

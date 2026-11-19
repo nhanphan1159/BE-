@@ -15,4 +15,8 @@ export class AllocateIncomeDto {
   customAllocations?: {
     [key: string]: number; // jar type -> amount
   };
+
+  @IsString()
+  @IsOptional()
+  transactionDate?: string;
 }
